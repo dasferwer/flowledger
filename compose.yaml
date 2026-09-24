@@ -1,0 +1,59 @@
+services:
+  source:
+    image: postgres:17
+    command: ["postgres","-c","wal_level=logical","-c","max_replication_slots=10","-c","max_wal_senders=10"]
+    environment:
+      POSTGRES_USER: demo
+      POSTGRES_PASSWORD: demo
+      POSTGRES_DB: source
+    ports: ["127.0.0.1:54839:5432"]
+    volumes:
+      - source:/var/lib/postgresql/data
+      - ./sql/source.sql:/docker-entrypoint-initdb.d/source.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL","pg_isready -U demo -d source"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+  target:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: demo
+      POSTGRES_PASSWORD: demo
+      POSTGRES_DB: projection
+    ports: ["127.0.0.1:54939:5432"]
+    volumes: ["target:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL","pg_isready -U demo -d projection"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+  rabbitmq:
+    image: rabbitmq:4-alpine
+    environment:
+      RABBITMQ_DEFAULT_USER: demo
+      RABBITMQ_DEFAULT_PASS: demo
+    ports: ["127.0.0.1:5639:5672"]
+    volumes: ["rabbit:/var/lib/rabbitmq"]
+  publisher:
+    build: .
+    environment: &environment
+      SOURCE_URL: postgresql://demo:demo@source/source
+      TARGET_URL: postgresql://demo:demo@target/projection
+      AMQP_URL: amqp://demo:demo@rabbitmq:5672/%2F
+      COPY_DELAY: "0.05"
+    depends_on:
+      source: {condition: service_healthy}
+      target: {condition: service_healthy}
+      rabbitmq: {condition: service_started}
+  projector:
+    build: .
+    command: ["python","-m","flowledger.projector"]
+    environment: *environment
+    depends_on:
+      target: {condition: service_healthy}
+      rabbitmq: {condition: service_started}
+volumes:
+  source:
+  target:
+  rabbit:
