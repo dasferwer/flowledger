@@ -13,6 +13,7 @@ from psycopg.types.json import Jsonb
 from psycopg2.extras import LogicalReplicationConnection
 
 from flowledger.db import init, schema, source, target
+from flowledger.faults import hit
 from flowledger.protocol import Decoder
 from flowledger.queue import connect
 
@@ -39,10 +40,15 @@ def bootstrap(control, replication, fingerprint, old):
             control.execute("SELECT pg_drop_replication_slot(%s)", (old["slot"],))
     generation = uuid.uuid4()
     slot = "flowledger_" + generation.hex[:20]
-    control.execute("ALTER PUBLICATION flowledger_pub SET TABLE public.items")
+    identifiers = [sql.Identifier(*table.split(".")) for table in fingerprint]
+    control.execute(
+        sql.SQL("ALTER PUBLICATION flowledger_pub SET TABLE {}").format(
+            sql.SQL(",").join(identifiers)
+        )
+    )
     with target() as conn:
         conn.execute(
-            """INSERT INTO state VALUES (1,%s,%s,'copying',%s,0,0)
+            """INSERT INTO state(id,generation,slot,status,schema,published,applied) VALUES (1,%s,%s,'copying',%s,0,0)
             ON CONFLICT(id) DO UPDATE SET generation=EXCLUDED.generation,slot=EXCLUDED.slot,
             status=EXCLUDED.status,schema=EXCLUDED.schema,published=0,applied=0""",
             (generation, slot, Jsonb(fingerprint)),
@@ -56,20 +62,34 @@ def bootstrap(control, replication, fingerprint, old):
     with psycopg.connect(os.environ["SOURCE_URL"]) as snapshot_conn:
         snapshot_conn.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
         snapshot_conn.execute(sql.SQL("SET TRANSACTION SNAPSHOT {}").format(sql.Literal(snapshot)))
-        snapshot_conn.execute("LOCK TABLE public.items IN ACCESS SHARE MODE")
-        with snapshot_conn.cursor(name="snapshot_rows") as rows:
-            rows.execute("SELECT id,row_to_json(items) FROM public.items ORDER BY id")
-            while batch := rows.fetchmany(500):
-                with target() as conn, conn.cursor() as out:
-                    out.executemany(
-                        "INSERT INTO projection VALUES (%s,%s,%s)",
-                        [(generation, identity, Jsonb(data)) for identity, data in batch],
+        snapshot_conn.execute(
+            sql.SQL("LOCK TABLE {} IN ACCESS SHARE MODE").format(sql.SQL(",").join(identifiers))
+        )
+        for table in fingerprint:
+            with snapshot_conn.cursor(name="snapshot_rows") as rows:
+                rows.execute(
+                    sql.SQL("SELECT id,row_to_json(t) FROM {} t ORDER BY id").format(
+                        sql.Identifier(*table.split("."))
                     )
-                time.sleep(float(os.environ.get("COPY_DELAY", "0")))
+                )
+                while batch := rows.fetchmany(500):
+                    with target() as conn, conn.cursor() as out:
+                        out.executemany(
+                            "INSERT INTO projection(generation,relation,id,data) VALUES (%s,%s,%s,%s)",
+                            [
+                                (generation, table, identity, Jsonb(data))
+                                for identity, data in batch
+                            ],
+                        )
+                    hit("snapshot_after_chunk")
+                    time.sleep(float(os.environ.get("COPY_DELAY", "0")))
     if schema(control) != fingerprint:
         raise RebuildNeeded("Схема изменилась во время снимка")
     with target() as conn:
-        conn.execute("UPDATE state SET status='ready' WHERE id=1 AND generation=%s", (generation,))
+        conn.execute(
+            "UPDATE state SET status='ready',rebuild_requested=false WHERE id=1 AND generation=%s",
+            (generation,),
+        )
         return conn.execute("SELECT * FROM state WHERE id=1").fetchone()
 
 
@@ -98,13 +118,14 @@ def run():
                 not state
                 or state["status"] != "ready"
                 or state["schema"] != fingerprint
+                or state["rebuild_requested"]
                 or not slot
                 or slot["wal_status"] == "lost"
             ):
                 state = bootstrap(control, replication, fingerprint, state)
             broker, channel = connect()
             channel.confirm_delivery()
-            decoder = Decoder()
+            decoder = Decoder(fingerprint)
             cursor = replication.cursor()
             cursor.start_replication(
                 slot_name=state["slot"],
@@ -117,6 +138,14 @@ def run():
             last_check = time.monotonic()
             while True:
                 if time.monotonic() - last_check >= 1:
+                    with target() as conn:
+                        if conn.execute(
+                            "SELECT rebuild_requested FROM state WHERE id=1"
+                        ).fetchone()["rebuild_requested"]:
+                            raise RebuildNeeded("Оператор запросил новый снимок")
+                        conn.execute(
+                            "INSERT INTO publisher_health(id,seen_at,error) VALUES (1,clock_timestamp(),NULL) ON CONFLICT(id) DO UPDATE SET seen_at=EXCLUDED.seen_at,error=NULL"
+                        )
                     if schema(control) != fingerprint:
                         raise RebuildNeeded("Схема изменилась: нужен новый снимок")
                     last_check = time.monotonic()
@@ -153,12 +182,14 @@ def run():
                             ),
                             mandatory=True,
                         )
+                        hit("publisher_after_publish")
                         with target() as conn:
                             conn.execute(
                                 "UPDATE state SET published=%s WHERE id=1 AND generation=%s",
                                 (position, state["generation"]),
                             )
                         state["published"] = position
+                    hit("publisher_after_checkpoint")
                     cursor.send_feedback(flush_lsn=position)
                     changes, size = [], 0
         finally:
@@ -173,7 +204,15 @@ def main():
     while True:
         try:
             run()
-        except Exception:
+        except Exception as exc:
+            try:
+                with target() as conn:
+                    conn.execute(
+                        "INSERT INTO publisher_health(id,error) VALUES (1,%s) ON CONFLICT(id) DO UPDATE SET error=EXCLUDED.error",
+                        (type(exc).__name__,),
+                    )
+            except psycopg.Error:
+                logger.warning("Состояние издателя недоступно")
             logger.exception("CDC остановлен; позиция неподтверждённых изменений сохранена")
         time.sleep(1)
 

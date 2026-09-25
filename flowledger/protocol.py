@@ -33,8 +33,10 @@ def convert(value, oid):
 
 
 class Decoder:
-    def __init__(self):
+    def __init__(self, allowed=None):
         self.relations = {}
+        self.allowed = set(allowed or ["public.items"])
+        self.names = {}
 
     def tuple(self, reader, columns):
         count = reader.number("H")
@@ -73,12 +75,15 @@ class Decoder:
                 oid = reader.number("I")
                 reader.number("I")
                 columns.append((column, oid))
-            if (namespace, name) != ("public", "items"):
+            if namespace + "." + name not in self.allowed:
                 raise ValueError("Публикация содержит неожиданную таблицу")
             self.relations[identity] = columns
+            self.names[identity] = namespace + "." + name
             return {"kind": "relation"}
         if kind in {b"I", b"U", b"D"}:
-            columns = self.relations[reader.number("I")]
+            relation_id = reader.number("I")
+            columns = self.relations[relation_id]
+            relation = self.names[relation_id]
             marker = reader.read(1)
             old = None
             if marker in {b"K", b"O"}:
@@ -86,20 +91,24 @@ class Decoder:
                 if kind != b"D":
                     marker = reader.read(1)
             if kind == b"D":
-                return {"kind": "delete", "id": old["id"]}
+                return {"kind": "delete", "id": old["id"], "relation": relation}
             if marker != b"N":
                 raise ValueError("Нет нового значения строки")
             row = self.tuple(reader, columns)
             return {
                 "kind": "upsert",
+                "relation": relation,
                 "data": {**(old or {}), **row},
                 "old_id": old.get("id") if old else None,
             }
         if kind == b"T":
             count = reader.number("I")
             reader.read(1)
+            truncated = []
             for _ in range(count):
-                if reader.number("I") not in self.relations:
+                identity = reader.number("I")
+                if identity not in self.relations:
                     raise ValueError("Неизвестная таблица TRUNCATE")
-            return {"kind": "truncate"}
+                truncated.append(self.names[identity])
+            return {"kind": "truncate", "relations": truncated}
         raise ValueError("Неподдерживаемое сообщение pgoutput: " + repr(kind))

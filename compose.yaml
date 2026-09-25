@@ -42,6 +42,8 @@ services:
       TARGET_URL: postgresql://demo:demo@target/projection
       AMQP_URL: amqp://demo:demo@rabbitmq:5672/%2F
       COPY_DELAY: "0.05"
+      FLOWLEDGER_TABLES: ${FLOWLEDGER_TABLES:-public.items,public.stores}
+      FLOWLEDGER_FAULTS: ${FLOWLEDGER_FAULTS:-0}
     depends_on:
       source: {condition: service_healthy}
       target: {condition: service_healthy}

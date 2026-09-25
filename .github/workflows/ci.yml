@@ -8,6 +8,7 @@ jobs:
     env:
       SOURCE_URL: postgresql://demo:demo@localhost:54839/source
       TARGET_URL: postgresql://demo:demo@localhost:54939/projection
+      FLOWLEDGER_FAULTS: "1"
       AMQP_URL: amqp://demo:demo@localhost:5639/%2F
     steps:
       - uses: actions/checkout@v4
@@ -21,5 +22,6 @@ jobs:
       - run: docker compose up --build -d
       - run: uv run pytest -q
       - run: uv run python -m scripts.recovery
+      - run: uv run python -m scripts.fault_recovery
       - if: always()
         run: docker compose logs --tail 30 publisher projector && docker compose down

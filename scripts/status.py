@@ -17,6 +17,14 @@ with target() as conn:
                     "published_lsn": str(state["published"]),
                     "applied_lsn": str(state["applied"]),
                     "rows": count,
+                    "tables": conn.execute(
+                        "SELECT relation,count(*) AS rows FROM projection WHERE generation=%s GROUP BY relation ORDER BY relation",
+                        (state["generation"],),
+                    ).fetchall(),
+                    "publisher": conn.execute(
+                        "SELECT seen_at::text,error,clock_timestamp()-seen_at<interval '5 seconds' AS recent FROM publisher_health WHERE id=1"
+                    ).fetchone(),
+                    "rebuild_requested": state["rebuild_requested"],
                 },
                 ensure_ascii=False,
                 indent=2,

@@ -39,6 +39,7 @@ def test_insert_update_delete_and_unicode():
     assert decoder.parse(b"D" + struct.pack("!I", 1) + b"O" + values(2, "new")) == {
         "kind": "delete",
         "id": 2,
+        "relation": "public.items",
     }
 
 
@@ -61,3 +62,20 @@ def test_primary_key_change_preserves_unchanged_toast():
     message = b"U" + struct.pack("!I", 1) + b"O" + values(1, "large-text") + b"N" + new_tuple
     decoded = decoder.parse(message)
     assert decoded["data"] == {"id": 2, "payload": "large-text"}
+
+
+def test_multiple_relations_and_truncate_scope():
+    decoder = Decoder(["public.items", "public.stores"])
+    decoder.parse(relation())
+    second = (
+        relation()
+        .replace(struct.pack("!I", 1), struct.pack("!I", 2), 1)
+        .replace(b"items\0", b"stores\0")
+    )
+    decoder.parse(second)
+    result = decoder.parse(b"I" + struct.pack("!I", 2) + b"N" + values(1, "store"))
+    assert result["relation"] == "public.stores"
+    truncated = decoder.parse(b"T" + struct.pack("!IBI", 1, 0, 2))
+    assert truncated == {"kind": "truncate", "relations": ["public.stores"]}
+    with pytest.raises(ValueError):
+        Decoder().parse(second)

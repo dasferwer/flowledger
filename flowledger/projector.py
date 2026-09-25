@@ -6,6 +6,7 @@ import uuid
 from psycopg.types.json import Jsonb
 
 from flowledger.db import init, target
+from flowledger.faults import hit
 from flowledger.queue import connect
 
 logger = logging.getLogger(__name__)
@@ -22,30 +23,34 @@ def apply(message):
             return False
         generation = uuid.UUID(message["generation"])
         for change in message["changes"]:
+            relation = change.get("relation", "public.items")
             if change["kind"] == "truncate":
-                conn.execute("DELETE FROM projection WHERE generation=%s", (generation,))
+                conn.execute(
+                    "DELETE FROM projection WHERE generation=%s AND relation=ANY(%s)",
+                    (generation, change.get("relations", ["public.items"])),
+                )
             elif change["kind"] == "delete":
                 conn.execute(
-                    "DELETE FROM projection WHERE generation=%s AND id=%s",
-                    (generation, change["id"]),
+                    "DELETE FROM projection WHERE generation=%s AND relation=%s AND id=%s",
+                    (generation, relation, change["id"]),
                 )
             else:
                 row = change["data"]
                 if change.get("old_id") is not None and change["old_id"] != row["id"]:
                     previous = conn.execute(
-                        "SELECT data FROM projection WHERE generation=%s AND id=%s",
-                        (generation, change["old_id"]),
+                        "SELECT data FROM projection WHERE generation=%s AND relation=%s AND id=%s",
+                        (generation, relation, change["old_id"]),
                     ).fetchone()
                     if previous:
                         row = {**previous["data"], **row}
                     conn.execute(
-                        "DELETE FROM projection WHERE generation=%s AND id=%s",
-                        (generation, change["old_id"]),
+                        "DELETE FROM projection WHERE generation=%s AND relation=%s AND id=%s",
+                        (generation, relation, change["old_id"]),
                     )
                 conn.execute(
-                    """INSERT INTO projection VALUES (%s,%s,%s) ON CONFLICT(generation,id)
+                    """INSERT INTO projection(generation,relation,id,data) VALUES (%s,%s,%s,%s) ON CONFLICT(generation,relation,id)
                     DO UPDATE SET data=projection.data || EXCLUDED.data""",
-                    (generation, row["id"], Jsonb(row)),
+                    (generation, relation, row["id"], Jsonb(row)),
                 )
         conn.execute("UPDATE state SET applied=%s WHERE id=1", (message["lsn"],))
         return True
@@ -62,6 +67,7 @@ def main():
             for method, properties, body in channel.consume("changes", inactivity_timeout=1):
                 if method:
                     apply(json.loads(body))
+                    hit("projector_after_commit")
                     channel.basic_ack(method.delivery_tag)
         except Exception:
             logger.exception("Проекция не обновлена; сообщение остаётся неподтверждённым")

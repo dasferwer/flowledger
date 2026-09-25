@@ -22,7 +22,8 @@ def generation(monkeypatch):
     generation = uuid.uuid4()
     with target() as conn:
         conn.execute(
-            "INSERT INTO state VALUES (1,%s,'unit','ready',%s,10,10)", (generation, Jsonb([]))
+            "INSERT INTO state(id,generation,slot,status,schema,published,applied) VALUES (1,%s,'unit','ready',%s,10,10)",
+            (generation, Jsonb([])),
         )
     try:
         yield str(generation)
@@ -77,3 +78,44 @@ def test_primary_key_change_and_truncate(generation):
     apply(message(generation, 40, [{"kind": "truncate"}]))
     with target() as conn:
         assert conn.execute("SELECT count(*) AS n FROM projection").fetchone()["n"] == 0
+
+
+def test_same_primary_key_in_two_tables_and_scoped_truncate(generation):
+    assert apply(
+        message(
+            generation,
+            20,
+            [
+                {
+                    "kind": "upsert",
+                    "relation": "public.items",
+                    "data": {"id": 1, "payload": "item"},
+                },
+                {"kind": "upsert", "relation": "public.stores", "data": {"id": 1, "name": "store"}},
+            ],
+        )
+    )
+    with target() as conn:
+        assert conn.execute("SELECT count(*) AS n FROM projection").fetchone()["n"] == 2
+    assert apply(message(generation, 30, [{"kind": "truncate", "relations": ["public.stores"]}]))
+    with target() as conn:
+        rows = conn.execute("SELECT relation,data FROM projection").fetchall()
+        assert len(rows) == 1
+        assert rows[0]["relation"] == "public.items"
+
+
+def test_cross_table_transaction_and_position_roll_back_together(generation):
+    with pytest.raises(KeyError):
+        apply(
+            message(
+                generation,
+                20,
+                [
+                    {"kind": "upsert", "relation": "public.items", "data": {"id": 1}},
+                    {"kind": "upsert", "relation": "public.stores", "data": {}},
+                ],
+            )
+        )
+    with target() as conn:
+        assert conn.execute("SELECT count(*) AS n FROM projection").fetchone()["n"] == 0
+        assert conn.execute("SELECT applied FROM state").fetchone()["applied"] == 10
