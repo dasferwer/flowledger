@@ -6,7 +6,8 @@ jobs:
   test:
     runs-on: ubuntu-latest
     env:
-      SOURCE_URL: postgresql://demo:demo@localhost:54839/source
+      SOURCE_URL: postgresql://flowledger_cdc:cdc-demo@localhost:54839/source
+      SOURCE_BOOTSTRAP_URL: postgresql://flowledger_owner:owner-demo@localhost:54839/source
       TARGET_URL: postgresql://demo:demo@localhost:54939/projection
       FLOWLEDGER_FAULTS: "1"
       AMQP_URL: amqp://demo:demo@localhost:5639/%2F

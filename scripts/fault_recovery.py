@@ -2,7 +2,7 @@ import json
 import subprocess
 import uuid
 
-from flowledger.db import source, target
+from flowledger.db import bootstrap_source, target
 from flowledger.queue import connect
 from scripts.recovery import docker, equal, state, wait
 
@@ -24,7 +24,7 @@ def exited(service):
 
 def mutate():
     marker = uuid.uuid4().hex
-    with source() as conn, conn.transaction():
+    with bootstrap_source() as conn, conn.transaction():
         conn.execute("UPDATE items SET payload=%s,version=version+1 WHERE id=100", (marker,))
         conn.execute("UPDATE stores SET name=%s WHERE id=1", (marker,))
 

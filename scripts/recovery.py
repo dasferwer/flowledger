@@ -5,7 +5,7 @@ import uuid
 
 from psycopg import sql
 
-from flowledger.db import source, tables, target
+from flowledger.db import bootstrap_source, source, tables, target
 from scripts.migrate_demo import main as migrate
 
 
@@ -77,7 +77,7 @@ def main():
                 and (not previous or s["generation"] != previous["generation"])
             )
         )
-        with source() as conn:
+        with bootstrap_source() as conn:
             conn.execute(
                 "UPDATE items SET payload=%s,version=version+1 WHERE id<=200",
                 ("Во время снимка: 'цитата' и \\ путь",),
@@ -86,7 +86,7 @@ def main():
             conn.execute(
                 "INSERT INTO items(id,payload,version) VALUES (10001,'new',1) ON CONFLICT(id) DO UPDATE SET version=items.version+1"
             )
-        with source() as conn:
+        with bootstrap_source() as conn:
             conn.execute("DELETE FROM items WHERE id=900001")
             conn.execute(
                 "INSERT INTO items(id,payload,version) VALUES (1,%s,1) ON CONFLICT(id) DO UPDATE SET payload=EXCLUDED.payload",
@@ -97,7 +97,7 @@ def main():
         wait(equal)
         first_generation = state()["generation"]
         docker("stop", "projector")
-        with source() as conn:
+        with bootstrap_source() as conn:
             conn.execute(
                 "UPDATE items SET payload='consumer-restart',version=version+1 WHERE id BETWEEN 201 AND 230"
             )
@@ -105,7 +105,7 @@ def main():
         docker("start", "projector")
         wait(equal)
         docker("kill", "-s", "SIGKILL", "publisher")
-        with source() as conn:
+        with bootstrap_source() as conn:
             conn.execute(
                 "UPDATE items SET payload='publisher-restart',version=version+1 WHERE id BETWEEN 231 AND 250"
             )
@@ -113,20 +113,20 @@ def main():
         wait(equal)
         docker("stop", "publisher")
         remove_slot()
-        with source() as conn:
+        with bootstrap_source() as conn:
             conn.execute("DELETE FROM items WHERE id=251")
         docker("start", "publisher")
         wait(lambda: state()["generation"] != first_generation and equal())
         before_schema = state()["generation"]
         column = "note_" + uuid.uuid4().hex[:6]
-        with source() as conn:
+        with bootstrap_source() as conn:
             conn.execute(
                 sql.SQL("ALTER TABLE items ADD COLUMN {} text DEFAULT 'added'").format(
                     sql.Identifier(column)
                 )
             )
         wait(lambda: state()["generation"] != before_schema and equal())
-        with source() as conn:
+        with bootstrap_source() as conn:
             count = conn.execute("SELECT count(*) AS n FROM items").fetchone()["n"]
         print(
             json.dumps(

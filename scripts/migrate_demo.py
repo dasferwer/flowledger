@@ -1,8 +1,8 @@
-from flowledger.db import source
+from flowledger.db import bootstrap_source
 
 
 def main():
-    with source() as conn:
+    with bootstrap_source() as conn:
         conn.execute(
             "CREATE TABLE IF NOT EXISTS public.stores(id bigint PRIMARY KEY,name text NOT NULL)"
         )

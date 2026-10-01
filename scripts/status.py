@@ -1,6 +1,6 @@
 import json
 
-from flowledger.db import target
+from flowledger.db import slot_status, target
 
 with target() as conn:
     state = conn.execute("SELECT * FROM state WHERE id=1").fetchone()
@@ -14,6 +14,7 @@ with target() as conn:
                     "generation": str(state["generation"]),
                     "status": state["status"],
                     "slot": state["slot"],
+                    "source_slot": slot_status(state["slot"]),
                     "published_lsn": str(state["published"]),
                     "applied_lsn": str(state["applied"]),
                     "rows": count,

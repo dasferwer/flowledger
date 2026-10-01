@@ -32,7 +32,7 @@ uv run python -m scripts.status
 Первый запуск создаёт 5000 строк `items` и две строки `stores`. Дождитесь `status: ready`; при первом старте RabbitMQ издатель может несколько раз повторить подключение. Поля `published_lsn` и `applied_lsn` — числовое представление LSN, а не счётчики строк. `ready` означает завершённый снимок, но не отсутствие задержки доставки.
 
 ```bash
-docker compose exec -T source psql -U demo -d source -c "UPDATE items SET payload='Обновлено', version=version+1 WHERE id=100;"
+docker compose exec -T source psql -U flowledger_owner -d source -c "UPDATE items SET payload='Обновлено', version=version+1 WHERE id=100;"
 uv run python -m scripts.status
 docker compose exec -T target psql -U demo -d projection -c "SELECT p.data FROM projection p JOIN state s ON p.generation=s.generation WHERE s.status='ready' AND p.relation='public.items' AND p.id=100;"
 ```
@@ -41,17 +41,58 @@ docker compose exec -T target psql -U demo -d projection -c "SELECT p.data FROM 
 
 Настройки перечислены в `.env.example`: `SOURCE_URL`, `TARGET_URL`, `AMQP_URL`, `FLOWLEDGER_TABLES` (список `schema.table` через запятую); `COPY_DELAY` задаёт паузу между порциями снимка. Compose использует собственные адреса сервисов и паузу 0,05 секунды для демонстрации записи во время копирования. Локально процессы можно запускать командами `uv run python -m flowledger.publisher` и `uv run python -m flowledger.projector`, предварительно остановив соответствующие контейнеры.
 
-При обновлении существующего демонстрационного тома выполните
-`uv run python -m scripts.migrate_demo`: скрипт добавит `stores`, если её ещё нет.
-Для своих таблиц задайте первичный ключ `id bigint`, `REPLICA IDENTITY FULL`
-и права подключения издателя. Изменение списка таблиц требует пересоздать
-контейнеры; издатель изменяет собственную publication и строит общий снимок.
+`SOURCE_URL` предназначен для CDC; отдельный `SOURCE_BOOTSTRAP_URL` — для
+миграции и демонстрационной записи. `scripts.migrate_demo` работает ролью владельца.
+Для своих таблиц владелец задаёт `id bigint`, `REPLICA IDENTITY FULL`, добавляет
+таблицы в publication и выдаёт CDC `SELECT`. Изменение списка требует пересоздать
+контейнеры; таблицы publication должны точно совпадать с `FLOWLEDGER_TABLES`.
+При несовпадении издатель останавливает попытку до смены поколения или удаления
+прежнего слота. Runtime больше не выполняет `ALTER PUBLICATION`.
 
 `uv run python -m scripts.rebuild` запрашивает новый снимок вручную, например
 после подтверждённой потери сообщений брокера. `scripts.status` показывает
 число строк по таблицам, позиции, запрос пересборки, время последней проверки
 издателя и тип последней ошибки. Свежий heartbeat не гарантирует малую задержку
 проекции: отдельно проверяйте `published_lsn` и `applied_lsn`.
+
+## Права источника и наблюдение за WAL
+
+`sql/source-roles.sql` отделяет владельца `flowledger_owner` от runtime-логина
+`flowledger_cdc`. Обе роли не являются superuser и не создают роли или базы.
+Владелец управляет таблицами и publication. CDC получает `CONNECT`, `USAGE`,
+`SELECT` на двух демонстрационных таблицах и атрибут `REPLICATION` для слота,
+экспортированного снимка и WAL. Запись, DDL и переход в роль владельца запрещены.
+Издатель получает только `SOURCE_URL`; bootstrap-пароль остаётся у CLI.
+Проектор не получает пароль источника.
+
+При обновлении существующего **демо** volume остановите процессы и примените
+скрипт администратором. Он также обновляет первоначальный том, где была только
+`items`: создаёт `stores` и две начальные записи, затем передаёт владение и права.
+Существующие строки сохраняются; повторное применение допустимо. Подготовка
+таблицы, ролей, publication и ACL выполняется одной транзакцией, поэтому ошибка
+полностью отменяет изменения. Скрипт рассчитан на `public.items` и `public.stores`:
+
+```bash
+docker compose stop publisher projector
+docker compose exec -T source psql -v ON_ERROR_STOP=1 -U demo -d source < sql/source-roles.sql
+# Обновите локальные SOURCE_URL и SOURCE_BOOTSTRAP_URL по .env.example.
+docker compose up --build -d publisher projector
+```
+
+`scripts.status` выводит `source_slot`: наличие и активность, `wal_status`,
+`restart_lsn`, `confirmed_flush_lsn`, текущий WAL LSN, `wal_retained_bytes`
+(текущая позиция минус restart) и `confirmation_lag_bytes` (минус подтверждённая
+позиция). Это байтовые расстояния LSN, не точный размер файлов на диске или
+задержка проекции по времени. Подтверждение означает сохранение в брокере;
+применение проекции показывается отдельно в `applied_lsn`. У отсутствующего
+слота `exists: false`; неизвестные позиции имеют `null`.
+
+Рост удерживаемого WAL требует внимания оператора. `REPLICATION` даёт широкие
+возможности внутри кластера и не изолирует отдельные publication или слоты.
+Для внешнего стенда нужны политика доступа, TLS, ограниченный `pg_hba.conf`,
+собственные секреты и контроль WAL. Эти границы описаны в
+[PostgreSQL security](https://www.postgresql.org/docs/17/logical-replication-security.html)
+и [pg_replication_slots](https://www.postgresql.org/docs/17/view-pg-replication-slots.html).
 
 ## Проверки
 
@@ -92,6 +133,6 @@ CI выполняет линтер, проверку форматировани�
 
 Доставка допускает повторы, а применение в проекции идемпотентно по поколению и LSN. Это не глобальная гарантия exactly-once для внешних побочных эффектов. Подтверждение источнику следует за сохранением в брокере, не за применением проекции. Полная потеря диска RabbitMQ после подтверждения требует нового снимка через `scripts.rebuild`: автоматического обнаружения такого случая нет. Обычная остановка потребителя сохраняет очередь на Docker volume.
 
-Старые поколения остаются в базе; сборка мусора, кластерный RabbitMQ, отказоустойчивость PostgreSQL, метрики и промышленная настройка прав не входят в проект. Стенд использует учебного суперпользователя PostgreSQL. Потеря слота восстанавливает актуальное состояние таблиц, но не историю всех пропущенных изменений.
+Старые поколения остаются в базе; сборка мусора, кластерный RabbitMQ, отказоустойчивость PostgreSQL и экспорт метрик не входят в проект. Runtime источника использует ограниченную роль, но первичная инициализация и целевая БД сохраняют учебного администратора PostgreSQL; пароли демонстрационные. Потеря слота восстанавливает актуальное состояние таблиц, но не историю всех пропущенных изменений.
 
 Формат протокола и снимков описан в документации [PostgreSQL](https://www.postgresql.org/docs/17/protocol-logicalrep-message-formats.html), [replication protocol](https://www.postgresql.org/docs/17/protocol-replication.html) и [psycopg2](https://www.psycopg.org/docs/extras.html).

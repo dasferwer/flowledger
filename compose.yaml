@@ -10,6 +10,7 @@ services:
     volumes:
       - source:/var/lib/postgresql/data
       - ./sql/source.sql:/docker-entrypoint-initdb.d/source.sql:ro
+      - ./sql/source-roles.sql:/docker-entrypoint-initdb.d/zz-source-roles.sql:ro
     healthcheck:
       test: ["CMD-SHELL","pg_isready -U demo -d source"]
       interval: 2s
@@ -37,13 +38,14 @@ services:
     volumes: ["rabbit:/var/lib/rabbitmq"]
   publisher:
     build: .
-    environment: &environment
-      SOURCE_URL: postgresql://demo:demo@source/source
-      TARGET_URL: postgresql://demo:demo@target/projection
-      AMQP_URL: amqp://demo:demo@rabbitmq:5672/%2F
+    environment:
+      <<: &environment
+        TARGET_URL: postgresql://demo:demo@target/projection
+        AMQP_URL: amqp://demo:demo@rabbitmq:5672/%2F
+        FLOWLEDGER_FAULTS: ${FLOWLEDGER_FAULTS:-0}
+      SOURCE_URL: postgresql://flowledger_cdc:cdc-demo@source/source
       COPY_DELAY: "0.05"
       FLOWLEDGER_TABLES: ${FLOWLEDGER_TABLES:-public.items,public.stores}
-      FLOWLEDGER_FAULTS: ${FLOWLEDGER_FAULTS:-0}
     depends_on:
       source: {condition: service_healthy}
       target: {condition: service_healthy}

@@ -9,6 +9,26 @@ def source():
     return psycopg.connect(os.environ["SOURCE_URL"], row_factory=dict_row, autocommit=True)
 
 
+def bootstrap_source():
+    return psycopg.connect(
+        os.environ["SOURCE_BOOTSTRAP_URL"], row_factory=dict_row, autocommit=True
+    )
+
+
+def slot_status(name):
+    with source() as conn:
+        row = conn.execute(
+            """SELECT slot_name AS slot, active, wal_status,
+                restart_lsn::text, confirmed_flush_lsn::text,
+                pg_current_wal_lsn()::text AS current_wal_lsn,
+                pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn)::bigint AS wal_retained_bytes,
+                pg_wal_lsn_diff(pg_current_wal_lsn(), confirmed_flush_lsn)::bigint AS confirmation_lag_bytes
+                FROM pg_replication_slots WHERE slot_name=%s AND database=current_database()""",
+            (name,),
+        ).fetchone()
+    return {"exists": True, **row} if row else {"exists": False, "slot": name}
+
+
 def target():
     return psycopg.connect(os.environ["TARGET_URL"], row_factory=dict_row)
 

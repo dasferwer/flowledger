@@ -29,7 +29,18 @@ def lsn_number(value):
     return (int(high, 16) << 32) + int(low, 16)
 
 
+def check_publication(control, fingerprint):
+    published = control.execute(
+        "SELECT schemaname,tablename FROM pg_publication_tables WHERE pubname='flowledger_pub'"
+    ).fetchall()
+    if {f"{row['schemaname']}.{row['tablename']}" for row in published} != set(fingerprint):
+        raise ValueError(
+            "Настройте publication flowledger_pub для FLOWLEDGER_TABLES ролью владельца"
+        )
+
+
 def bootstrap(control, replication, fingerprint, old):
+    check_publication(control, fingerprint)
     if old:
         slot = control.execute(
             "SELECT active FROM pg_replication_slots WHERE slot_name=%s", (old["slot"],)
@@ -41,11 +52,6 @@ def bootstrap(control, replication, fingerprint, old):
     generation = uuid.uuid4()
     slot = "flowledger_" + generation.hex[:20]
     identifiers = [sql.Identifier(*table.split(".")) for table in fingerprint]
-    control.execute(
-        sql.SQL("ALTER PUBLICATION flowledger_pub SET TABLE {}").format(
-            sql.SQL(",").join(identifiers)
-        )
-    )
     with target() as conn:
         conn.execute(
             """INSERT INTO state(id,generation,slot,status,schema,published,applied) VALUES (1,%s,%s,'copying',%s,0,0)
@@ -100,6 +106,7 @@ def run():
         ]:
             raise RuntimeError("Другой издатель уже работает")
         fingerprint = schema(control)
+        check_publication(control, fingerprint)
         with target() as conn:
             state = conn.execute("SELECT * FROM state WHERE id=1").fetchone()
         slot = (
