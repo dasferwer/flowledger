@@ -1,0 +1,21 @@
+# Отдельные host-порты демонстрационного стенда; контейнерные URL не меняются.
+services:
+  source:
+    ports: !override
+      - "127.0.0.1:${SOURCE_PROOF_PORT:-54840}:5432"
+  target:
+    ports: !override
+      - "127.0.0.1:${TARGET_PROOF_PORT:-54940}:5432"
+  rabbitmq:
+    ports: !override
+      - "127.0.0.1:${AMQP_PROOF_PORT:-5640}:5672"
+  publisher:
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "from flowledger.db import target; c=target(); assert c.execute(\"SELECT 1 FROM state WHERE id=1 AND status='ready'\").fetchone()"
+      interval: 2s
+      timeout: 3s
+      retries: 90

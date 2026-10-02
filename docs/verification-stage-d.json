@@ -1,0 +1,22 @@
+{
+  "checked_at_utc": "2026-10-02T20:46:49.352655+00:00",
+  "application_base_sha": "2a9eecef921fe9fe002599f6ded0e53015e29da6",
+  "scope": "Локальные проверки изменений этапа D; CI опубликованного коммита проверяется отдельно.",
+  "environment": {
+    "host": "macOS arm64",
+    "database": "PostgreSQL 17",
+    "compose": "5.4.0"
+  },
+  "pytest_passed": 23,
+  "ruff": "passed",
+  "format": "passed",
+  "scenario": {
+    "source_rows": 4989,
+    "full_reconciliation": true,
+    "writes_during_snapshot": true,
+    "publisher_restart": true,
+    "projector_restart": true,
+    "lost_slot_rebuilt": true,
+    "added_column_rebuilt": true
+  }
+}

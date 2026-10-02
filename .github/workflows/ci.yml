@@ -20,6 +20,8 @@ jobs:
       - run: uv sync --frozen
       - run: uv run ruff check .
       - run: uv run ruff format --check .
+      - name: Проверка конфигурации отдельного стенда восстановления
+        run: COMPOSE_FILE=compose.yaml:compose.proof.yaml docker compose config --quiet
       - run: docker compose up --build -d
       - run: uv run pytest -q
       - run: uv run python -m scripts.recovery
